@@ -130,6 +130,10 @@
                         class="w-full rounded-xl bg-zinc-900/90 border border-zinc-700/80 focus:border-brand-500 focus:ring-2 focus:ring-brand-500/20 text-sm text-zinc-100 placeholder-zinc-500 p-3.5 transition-all resize-none"
                         placeholder="Contoh: Seekor kucing astronot mengambang di luar angkasa dengan latar belakang nebula warna-warni, pencahayaan sinematik, 8k..."
                     ></textarea>
+                    <div class="mt-3 flex items-center justify-between gap-3 text-xs">
+                        <span id="agentModuleStatus" class="text-amber-300">Memuat modul AI Agent dari GitHub Raw...</span>
+                        <button id="btnRetryAgentLoad" type="button" class="hidden text-brand-400 hover:text-brand-300 underline">Muat ulang modul</button>
+                    </div>
                 </div>
 
                 <!-- Generate Button -->
@@ -230,7 +234,9 @@
             currentImageUrl: null,
             currentPrompt: '',
             chatHistory: [], // Menyimpan riwayat percakapan untuk multi-turn editing
-            gallery: []
+            gallery: [],
+            agentModules: {},
+            agentReady: false
         };
 
         // Referensi Elemen DOM
@@ -251,8 +257,107 @@
             btnResetSession: document.getElementById('btnResetSession'),
             historySection: document.getElementById('historySection'),
             historyGrid: document.getElementById('historyGrid'),
-            historyCount: document.getElementById('historyCount')
+            historyCount: document.getElementById('historyCount'),
+            agentModuleStatus: document.getElementById('agentModuleStatus'),
+            btnRetryAgentLoad: document.getElementById('btnRetryAgentLoad')
         };
+
+
+        // Memuat konfigurasi AI Agent secara dinamis dari GitHub Raw.
+        const AGENT_BASE_URL = 'https://raw.githubusercontent.com/applestoree/ai-agent/main/';
+        const AGENT_MANIFEST_URL = AGENT_BASE_URL + 'agent.md';
+
+        function setAgentModuleStatus(message, isError = false) {
+            els.agentModuleStatus.textContent = message;
+            els.agentModuleStatus.className = isError ? 'text-red-300' : 'text-emerald-300';
+            els.btnRetryAgentLoad.classList.toggle('hidden', !isError);
+        }
+
+        async function loadAgentModules() {
+            state.agentReady = false;
+            els.btnGenerate.disabled = true;
+            setAgentModuleStatus('Mengambil agent.md dari GitHub Raw...');
+            try {
+                const manifestResponse = await fetch(AGENT_MANIFEST_URL, { cache: 'no-store' });
+                if (!manifestResponse.ok) throw new Error('Gagal mengambil agent.md (HTTP ' + manifestResponse.status + ').');
+                const manifest = await manifestResponse.text();
+                const registryRows = [...manifest.matchAll(/^\|\s*([^|]+)\s*\|\s*`([^\`]+)`\s*\|\s*`(https:\/\/raw\.githubusercontent\.com\/applestoree\/ai-agent\/main\/[^\`]+)`\s*\|$/gm)];
+                if (!registryRows.length) throw new Error('Module Registry tidak ditemukan atau format tabelnya tidak sesuai.');
+
+                const modules = {};
+                for (let i = 0; i < registryRows.length; i++) {
+                    const name = registryRows[i][1].trim();
+                    const path = registryRows[i][2].trim();
+                    const url = registryRows[i][3].trim();
+                    if (!url.startsWith(AGENT_BASE_URL) || !path.endsWith('.md')) throw new Error('URL modul tidak valid: ' + path);
+                    setAgentModuleStatus('Memuat modul ' + (i + 1) + '/' + registryRows.length + ': ' + name);
+                    const response = await fetch(url, { cache: 'no-store' });
+                    if (!response.ok) throw new Error('Gagal memuat ' + path + ' (HTTP ' + response.status + ').');
+                    modules[path] = await response.text();
+                }
+                state.agentModules = modules;
+                state.agentReady = true;
+                els.btnGenerate.disabled = false;
+                setAgentModuleStatus('AI Agent aktif · ' + Object.keys(modules).length + ' modul dimuat dari GitHub Raw');
+            } catch (error) {
+                state.agentModules = {};
+                state.agentReady = false;
+                els.btnGenerate.disabled = true;
+                setAgentModuleStatus('Modul AI Agent gagal dimuat: ' + error.message, true);
+                console.error('AI Agent module loading error:', error);
+            }
+        }
+
+        function getAgentModule(path) {
+            const content = state.agentModules[path];
+            if (typeof content !== 'string' || !content.trim()) throw new Error('Modul wajib belum tersedia: ' + path);
+            return content;
+        }
+
+        function buildAgentPrompt(userPrompt) {
+            if (!state.agentReady) throw new Error('Modul AI Agent belum berhasil dimuat. Silakan muat ulang modul.');
+            const get = getAgentModule;
+            const role = get('roles/ai-role.md').replaceAll('{{agent_role}}', 'AI Image Prompt Engineer dan Visual Subject Strategist');
+            const specialist = get('roles/ai-subject-strategist.md');
+            const identity = get('identity/ai-identity.md').replaceAll('{{agent_name}}', 'AI Image Agent');
+            const domain = get('knowledge/domain-knowledge.md').replaceAll('{{domain_name}}', 'Image Generation dan Visual Prompt Engineering');
+
+            const values = {
+                agent_identity: identity,
+                agent_role: role + '\n\n' + specialist,
+                system_instructions: get('instructions/system-instructions.md'),
+                behavior_rules: get('instructions/behavior-rules.md'),
+                constraints: get('instructions/constraints.md'),
+                reasoning_strategy: get('reasoning/reasoning-strategy.md'),
+                domain_knowledge: domain,
+                tools_definition: get('tools/tools-definition.md'),
+                tools_usage: get('tools/tools-usage.md'),
+                input_analysis: get('workflows/input-analysis.md'),
+                task_execution: get('workflows/task-execution.md'),
+                output_validation: get('workflows/output-validation.md'),
+                user_input: userPrompt,
+                context: 'Tugas: membuat atau mengedit gambar. Rasio aspek wajib dan tetap 4:5. Pertahankan maksud, subjek, detail, dan batasan pengguna. Jangan menambahkan teks visual kecuali diminta.',
+                output_format: 'Hasilkan gambar sesuai instruksi pengguna. Jangan mengembalikan penjelasan teks sebagai pengganti gambar.'
+            };
+
+            let assembled = get('templates/template-prompt.md').replace(/\{\{([a-z_]+)\}\}/g, (match,key) =>
+                Object.prototype.hasOwnProperty.call(values,key) ? values[key] : match
+            );
+            const supportingPaths = [
+                'reasoning/decision-making.md',
+                'reasoning/validation.md',
+                'knowledge/reference.md',
+                'templates/output-template.md',
+                'examples/examples.md'
+            ];
+            const supporting = supportingPaths.map(path => get(path).replace(/\{\{[^}]+\}\}/g,'')).join('\n\n');
+            assembled += '\n\n## Additional Agent Modules\n\n' + supporting;
+            assembled += '\n\n## Fixed Image Output Constraint\nAspect ratio: 4:5. This setting must not be changed.';
+            return assembled;
+        }
+
+        els.btnRetryAgentLoad.addEventListener('click', loadAgentModules);
+        loadAgentModules();
 
         // Fungsi Notifikasi Toast (Menggantikan alert)
         function showToast(message, type = 'info') {
@@ -359,6 +464,10 @@
             }
 
             if (state.isGenerating) return;
+            if (!state.agentReady) {
+                showToast('Modul AI Agent belum siap. Periksa status pemuatan modul.', 'error');
+                return;
+            }
 
             // Update UI ke status Loading
             state.isGenerating = true;
@@ -369,7 +478,7 @@
             els.loadingState.classList.remove('hidden');
             els.loadingState.classList.add('flex');
 
-            const fullPrompt = rawPrompt;
+            const fullPrompt = buildAgentPrompt(rawPrompt);
             const apiKey = ""; // Disediakan otomatis oleh runtime
             const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-image:generateContent?key=${apiKey}`;
 
@@ -428,7 +537,7 @@
                 ];
 
                 state.currentImageUrl = imageUrl;
-                state.currentPrompt = fullPrompt;
+                state.currentPrompt = rawPrompt;
 
                 // Tampilkan gambar hasil
                 els.generatedImage.src = imageUrl;
@@ -442,7 +551,7 @@
                 els.btnResetSession.classList.add('flex');
 
                 // Tambahkan ke galeri riwayat
-                addToHistory(imageUrl, fullPrompt, [...state.chatHistory]);
+                addToHistory(imageUrl, rawPrompt, [...state.chatHistory]);
                 showToast(state.isEditMode ? 'Gambar berhasil diperbarui!' : 'Gambar berhasil dibuat!', 'success');
 
                 // Keluar dari mode edit setelah selesai menerapkan perubahan
@@ -465,7 +574,7 @@
                 showToast(`Gagal membuat gambar: ${error.message}`, 'error');
             } finally {
                 state.isGenerating = false;
-                els.btnGenerate.disabled = false;
+                els.btnGenerate.disabled = !state.agentReady;
                 els.btnGenerateText.textContent = state.isEditMode ? 'Terapkan Perubahan' : 'Buat Gambar';
             }
         }
